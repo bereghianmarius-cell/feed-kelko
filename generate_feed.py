@@ -1,120 +1,161 @@
 import os
 import requests
 import xml.etree.ElementTree as ET
+from xml.dom import minidom
 
-SHOP_URL = os.environ.get("SHOP_URL")         # Es: zx7y17-gz.myshopify.com
-CLIENT_ID = os.environ.get("CLIENT_ID")       # Il Client ID della tua app
-CLIENT_SECRET = os.environ.get("CLIENT_SECRET") # Il Client Secret della tua app
+# Configurazione variabili d'ambiente
+SHOP_URL = os.environ.get("SHOP_URL", "").replace("https://", "").replace("http://", "").strip("/")
+CLIENT_ID = os.environ.get("CLIENT_ID", "").strip()
+CLIENT_SECRET = os.environ.get("CLIENT_SECRET", "").strip()
+
+# Dominio pubblico finale richiesto da Kelkoo
+PUBLIC_DOMAIN = "25thstreet.it"
 
 def get_access_token():
-    """Ottiene un token temporaneo usando Client ID e Client Secret"""
-    auth_url = f"https://{SHOP_URL}/admin/oauth/access_token"
+    url = f"https://{SHOP_URL}/admin/oauth/access_token"
     payload = {
         "client_id": CLIENT_ID,
         "client_secret": CLIENT_SECRET,
         "grant_type": "client_credentials"
     }
-    response = requests.post(auth_url, data=payload)
-    if response.status_code != 200:
-        raise Exception(f"Errore di autenticazione OAuth: {response.text}")
-    
-    return response.json().get("access_token")
+    response = requests.post(url, json=payload)
+    response.raise_for_status()
+    return response.json()["access_token"]
 
-def fetch_all_variants(access_token):
+def clean_ean(barcode):
+    """Pulisce il codice EAN evitando format float o scientifici."""
+    if not barcode:
+        return ""
+    barcode_str = str(barcode).strip()
+    if barcode_str.endswith('.0'):
+        barcode_str = barcode_str[:-2]
+    # Mantiene solo cifre numeriche
+    cleaned = ''.join(filter(str.isdigit, barcode_str))
+    return cleaned
+
+def fetch_all_products(access_token):
+    graphql_url = f"https://{SHOP_URL}/admin/api/2024-01/graphql.json"
     headers = {
-        "X-Shopify-Access-Token": access_token,
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": access_token
     }
-    
-    variants_list = []
+
+    query = """
+    query getProducts($cursor: String) {
+      products(first: 25, after: $cursor) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+        nodes {
+          title
+          vendor
+          productType
+          featuredImage {
+            url
+          }
+          variants(first: 100) {
+            nodes {
+              id
+              title
+              sku
+              price
+              barcode
+              availableForSale
+              image {
+                url
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+
+    products = []
+    cursor = None
     has_next_page = True
-    end_cursor = None
 
     while has_next_page:
-        cursor_arg = f', after: "{end_cursor}"' if end_cursor else ""
-        query = f"""
-        {{
-          products(first: 50{cursor_arg}) {{
-            pageInfo {{
-              hasNextPage
-              endCursor
-            }}
-            edges {{
-              node {{
-                title
-                handle
-                vendor
-                productType
-                variants(first: 100) {{
-                  edges {{
-                    node {{
-                      sku
-                      title
-                      price
-                      availableForSale
-                      barcode
-                      image {{
-                        url
-                      }}
-                    }}
-                  }}
-                }}
-              }}
-            }}
-          }}
-        }}
-        """
+        variables = {"cursor": cursor} if cursor else {}
+        response = requests.post(graphql_url, json={'query': query, 'variables': variables}, headers=headers)
         
-        response = requests.post(f"https://{SHOP_URL}/admin/api/2024-01/graphql.json", json={"query": query}, headers=headers)
         if response.status_code != 200:
-            raise Exception(f"Errore API Shopify: {response.text}")
-            
-        data = response.json()["data"]["products"]
-        
-        for product_edge in data["edges"]:
-            product = product_edge["node"]
-            for variant_edge in product["variants"]["edges"]:
-                variant = variant_edge["node"]
-                
-                variants_list.append({
-                    "sku": variant["sku"] or "",
-                    "title": f"{product['title']} - {variant['title']}" if variant['title'] != 'Default Title' else product['title'],
-                    "url": f"https://{SHOP_URL.replace('.myshopify.com', '')}.com/products/{product['handle']}",
-                    "price": variant["price"],
-                    "brand": product["vendor"] or "Generico",
-                    "availability": "1" if variant["availableForSale"] else "2",
-                    "barcode": variant["barcode"] or "",
-                    "image": variant["image"]["url"] if variant["image"] else ""
-                })
+            print(f"Errore GraphQL: {response.text}")
+            break
 
-        has_next_page = data["pageInfo"]["hasNextPage"]
-        end_cursor = data["pageInfo"]["endCursor"]
-        
-    return variants_list
+        data = response.json()
+        if "errors" in data:
+            print(f"Errore query: {data['errors']}")
+            break
 
-def generate_xml(variants):
+        product_data = data['data']['products']
+        products.extend(product_data['nodes'])
+        has_next_page = product_data['pageInfo']['hasNextPage']
+        cursor = product_data['pageInfo']['endCursor']
+        print(f"Scaricati {len(products)} prodotti...")
+
+    return products
+
+def generate_kelkoo_xml(products):
     root = ET.Element("products")
-    
-    for v in variants:
-        product_elem = ET.SubElement(root, "product")
-        
-        ET.SubElement(product_elem, "offer_id").text = v["sku"]
-        ET.SubElement(product_elem, "title").text = v["title"]
-        ET.SubElement(product_elem, "product_url").text = v["url"]
-        ET.SubElement(product_elem, "price").text = v["price"]
-        ET.SubElement(product_elem, "brand").text = v["brand"]
-        ET.SubElement(product_elem, "availability").text = v["availability"]
-        ET.SubElement(product_elem, "ean").text = v["barcode"]
-        ET.SubElement(product_elem, "image_url").text = v["image"]
 
-    tree = ET.ElementTree(root)
-    tree.write("kelkoo.xml", encoding="utf-8", xml_declaration=True)
+    for prod in products:
+        prod_title = prod.get("title", "")
+        vendor = prod.get("vendor", "")
+        category = prod.get("productType", "") or "General"
+        
+        # Immagine di fallback se la variante non ne ha una specifica
+        main_img = prod.get("featuredImage", {}).get("url") if prod.get("featuredImage") else ""
+
+        for var in prod.get("variants", {}).get("nodes", []):
+            offer_id = var.get("sku") or var.get("id", "").split("/")[-1]
+            var_title = var.get("title", "")
+            
+            # Titolo completo
+            full_title = f"{prod_title} - {var_title}" if var_title and var_title.lower() != "default title" else prod_title
+            
+            # URL Prodotto con dominio corretto
+            product_url = f"https://{PUBLIC_DOMAIN}/products/{offer_id}"
+            
+            price = var.get("price", "0.00")
+            availability = "1" if var.get("availableForSale") else "2"
+            
+            # Gestione Immagine (variante o principale)
+            var_img = var.get("image", {}).get("url") if var.get("image") else ""
+            img_url = var_img or main_img
+            
+            # Salta la variante se non ha un'immagine (Kelkoo la scarterebbe)
+            if not img_url:
+                continue
+
+            # Pulizia Codice EAN
+            ean_code = clean_ean(var.get("barcode"))
+
+            # Costruzione nodo XML
+            p_elem = ET.SubElement(root, "product")
+            
+            ET.SubElement(p_elem, "offer_id").text = str(offer_id)
+            ET.SubElement(p_elem, "title").text = full_title
+            ET.SubElement(p_elem, "product_url").text = product_url
+            ET.SubElement(p_elem, "price").text = str(price)
+            ET.SubElement(p_elem, "brand").text = vendor
+            ET.SubElement(p_elem, "category").text = category
+            ET.SubElement(p_elem, "availability").text = availability
+            
+            if ean_code:
+                ET.SubElement(p_elem, "ean").text = ean_code
+            else:
+                ET.SubElement(p_elem, "ean")
+                
+            ET.SubElement(p_elem, "image_url").text = img_url
+
+    xml_str = minidom.parseString(ET.tostring(root, encoding="utf-8")).toprettyxml(indent="  ")
+    with open("kelkoo.xml", "w", encoding="utf-8") as f:
+        f.write(xml_str)
+    print("File kelkoo.xml generato con successo!")
 
 if __name__ == "__main__":
-    print("Autenticazione in corso...")
     token = get_access_token()
-    print("Inizio recupero varianti da Shopify...")
-    variants = fetch_all_variants(token)
-    print(f"Trovate {len(variants)} varianti. Generazione XML in corso...")
-    generate_xml(variants)
-    print("File kelkoo.xml generato con successo!")
+    prods = fetch_all_products(token)
+    generate_kelkoo_xml(prods)
