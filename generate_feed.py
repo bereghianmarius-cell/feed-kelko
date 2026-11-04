@@ -29,7 +29,6 @@ def clean_ean(barcode):
     barcode_str = str(barcode).strip()
     if barcode_str.endswith('.0'):
         barcode_str = barcode_str[:-2]
-    # Mantiene solo cifre numeriche
     cleaned = ''.join(filter(str.isdigit, barcode_str))
     return cleaned
 
@@ -49,6 +48,7 @@ def fetch_all_products(access_token):
         }
         nodes {
           title
+          handle
           vendor
           productType
           featuredImage {
@@ -102,37 +102,33 @@ def generate_kelkoo_xml(products):
 
     for prod in products:
         prod_title = prod.get("title", "")
+        handle = prod.get("handle", "")
         vendor = prod.get("vendor", "")
         category = prod.get("productType", "") or "General"
         
-        # Immagine di fallback se la variante non ne ha una specifica
         main_img = prod.get("featuredImage", {}).get("url") if prod.get("featuredImage") else ""
 
         for var in prod.get("variants", {}).get("nodes", []):
-            offer_id = var.get("sku") or var.get("id", "").split("/")[-1]
+            raw_var_id = var.get("id", "").split("/")[-1]
+            offer_id = var.get("sku") or raw_var_id
             var_title = var.get("title", "")
             
-            # Titolo completo
             full_title = f"{prod_title} - {var_title}" if var_title and var_title.lower() != "default title" else prod_title
             
-            # URL Prodotto con dominio corretto
-            product_url = f"https://{PUBLIC_DOMAIN}/products/{offer_id}"
+            # URL Prodotto valido usando handle e ID variante per Shopify
+            product_url = f"https://{PUBLIC_DOMAIN}/products/{handle}?variant={raw_var_id}"
             
             price = var.get("price", "0.00")
             availability = "1" if var.get("availableForSale") else "2"
             
-            # Gestione Immagine (variante o principale)
             var_img = var.get("image", {}).get("url") if var.get("image") else ""
             img_url = var_img or main_img
             
-            # Salta la variante se non ha un'immagine (Kelkoo la scarterebbe)
             if not img_url:
                 continue
 
-            # Pulizia Codice EAN
             ean_code = clean_ean(var.get("barcode"))
 
-            # Costruzione nodo XML
             p_elem = ET.SubElement(root, "product")
             
             ET.SubElement(p_elem, "offer_id").text = str(offer_id)
