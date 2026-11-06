@@ -39,9 +39,10 @@ def fetch_all_products(access_token):
         "X-Shopify-Access-Token": access_token
     }
 
+    # Query con status:ACTIVE per prendere solo i prodotti attivi e visibili nel negozio
     query = """
     query getProducts($cursor: String) {
-      products(first: 25, after: $cursor) {
+      products(first: 25, after: $cursor, query: "status:ACTIVE") {
         pageInfo {
           hasNextPage
           endCursor
@@ -93,7 +94,7 @@ def fetch_all_products(access_token):
         products.extend(product_data['nodes'])
         has_next_page = product_data['pageInfo']['hasNextPage']
         cursor = product_data['pageInfo']['endCursor']
-        print(f"Scaricati {len(products)} prodotti...")
+        print(f"Scaricati {len(products)} prodotti attivi...")
 
     return products
 
@@ -118,7 +119,7 @@ def generate_kelkoo_xml(products):
             # URL Prodotto valido usando handle e ID variante per Shopify
             product_url = f"https://{PUBLIC_DOMAIN}/products/{handle}?variant={raw_var_id}"
             
-            # PREZZO ORIGINALE ESATTO DA SHOPIFY (Nessun ricarico)
+            # Prezzo originale esatto da Shopify (nessun ricarico)
             price = str(var.get("price", "0.00"))
             
             availability = "1" if var.get("availableForSale") else "2"
@@ -151,7 +152,7 @@ def generate_kelkoo_xml(products):
     xml_str = minidom.parseString(ET.tostring(root, encoding="utf-8")).toprettyxml(indent="  ")
     with open("kelkoo.xml", "w", encoding="utf-8") as f:
         f.write(xml_str)
-    print("File kelkoo.xml generato con successo con i dati originali di Shopify!")
+    print("File kelkoo.xml generato con successo!")
 
 if __name__ == "__main__":
     token = get_access_token()
