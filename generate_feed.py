@@ -1,58 +1,68 @@
-def generate_kelkoo_xml(products):
-    root = ET.Element("products")
+import pandas as pd
 
-    for prod in products:
-        prod_title = str(prod.get("title", "")).strip().replace("?", "")
-        handle = prod.get("handle", "")
-        vendor = str(prod.get("vendor", "")).strip()
-        category = str(prod.get("productType", "")).strip() or "General"
-        
-        main_img = prod.get("featuredImage", {}).get("url") if prod.get("featuredImage") else ""
+# 1. Carica il file CSV sorgente
+df = pd.read_csv('tuo_file_sorgente.csv', sep='|')
 
-        for var in prod.get("variants", {}).get("nodes", []):
-            raw_var_id = str(var.get("id", "")).split("/")[-1]
-            offer_id = str(var.get("sku") or raw_var_id).strip().replace("?", "")
-            var_title = str(var.get("title", "")).strip().replace("?", "")
-            
-            # Titolo pulito
-            if var_title and var_title.lower() != "default title":
-                full_title = f"{prod_title} - {var_title}"
-            else:
-                full_title = prod_title
-            
-            # URL Prodotto
-            product_url = f"https://{PUBLIC_DOMAIN}/products/{handle}?variant={raw_var_id}"
-            
-            price = str(var.get("price", "0.00")).strip()
-            availability = "1" if var.get("availableForSale") else "2"
-            
-            var_img = var.get("image", {}).get("url") if var.get("image") else ""
-            img_url = var_img or main_img
-            
-            if not img_url:
-                continue
+shopify_rows = []
 
-            # Pulizia rigorosa EAN
-            ean_code = clean_ean(var.get("barcode"))
+# 2. Scorre ogni riga del file direttamente
+for idx, row in df.iterrows():
+    sku = str(row['SKU']).strip()
+    size = row.get('MODEL_SIZE', '')
+    
+    # Costruisce lo SKU della variante unendo SKU e Taglia (se presente)
+    sku_var = f"{sku}_{size}" if pd.notna(size) and str(size).strip() != '' else sku
+    
+    # Calcolo prezzo con ricarico del 70% (+70%)
+    price_val = float(row['PRICE']) if pd.notna(row['PRICE']) else 0.0
+    price_markup = round(price_val * 1.70, 2)
+    
+    compare_price = round(float(row['STREET_PRICE']), 2) if pd.notna(row['STREET_PRICE']) else ""
+    qty = int(row['QUANTITY']) if pd.notna(row['QUANTITY']) else 0
+    
+    # --- LETTURA EAN / BARCODE DIRETTA ---
+    raw_barcode = row.get('BARCODE', row.get('EAN', ''))
+    if pd.notna(raw_barcode) and str(raw_barcode).strip() != '':
+        barcode = str(raw_barcode).split('.')[0].strip() # Pulisce eventuali decimali .0
+    else:
+        barcode = ""
+    
+    # Gestione immagini
+    images = [row.get('PICTURE_1', ''), row.get('PICTURE_2', ''), row.get('PICTURE_3', '')]
+    images = [img for img in images if pd.notna(img) and str(img).strip() != '']
+    
+    # Mappatura per il formato Shopify
+    shopify_row = {
+        'Handle': sku.lower().replace('_', '-').replace(' ', '-'),
+        'Title': row.get('Titel_ITA', ''),
+        'Body (HTML)': row.get('Description_ITA', ''),
+        'Vendor': row.get('BRAND', ''),
+        'Standard Product Type': row.get('SUBCAT', ''),
+        'Custom Product Type': row.get('SUBCAT', ''),
+        'Tags': f"{row.get('CAT', '')}, {row.get('SEX', '')}",
+        'Published': 'TRUE',
+        'Option1 Name': 'Taglia' if pd.notna(size) and str(size).strip() != '' else '',
+        'Option1 Value': size if pd.notna(size) else '',
+        'Option2 Name': 'Colore' if pd.notna(row.get('COLOR')) else '',
+        'Option2 Value': row.get('COLOR', '') if pd.notna(row.get('COLOR')) else '',
+        'Variant SKU': sku_var,
+        'Variant Grams': 0,
+        'Variant Inventory Tracker': 'shopify',
+        'Variant Qty': qty,
+        'Variant Inventory Policy': 'deny',
+        'Variant Fulfillment Service': 'manual',
+        'Variant Price': price_markup,
+        'Variant Compare At Price': compare_price,
+        'Variant Requires Shipping': 'TRUE',
+        'Variant Taxable': 'TRUE',
+        'Variant Barcode': barcode,  # <-- Qui viene inserito correttamente l'EAN
+        'Image Src': images[0] if len(images) > 0 else '',
+        'Image Position': 1 if len(images) > 0 else '',
+        'Status': 'active'
+    }
+    shopify_rows.append(shopify_row)
 
-            # Costruzione nodo XML
-            p_elem = ET.SubElement(root, "product")
-            
-            ET.SubElement(p_elem, "offer_id").text = offer_id
-            ET.SubElement(p_elem, "title").text = full_title
-            ET.SubElement(p_elem, "product_url").text = product_url
-            ET.SubElement(p_elem, "price").text = price
-            ET.SubElement(p_elem, "brand").text = vendor
-            ET.SubElement(p_elem, "category").text = category
-            ET.SubElement(p_elem, "availability").text = availability
-            
-            # Scrive il tag EAN solo se esiste davvero un codice numerico valido
-            if ean_code and len(ean_code) > 3:
-                ET.SubElement(p_elem, "ean").text = ean_code
-                
-            ET.SubElement(p_elem, "image_url").text = img_url
-
-    xml_str = minidom.parseString(ET.tostring(root, encoding="utf-8")).toprettyxml(indent="  ")
-    with open("kelkoo.xml", "w", encoding="utf-8") as f:
-        f.write(xml_str)
-    print("File kelkoo.xml generato perfettamente!")
+# 3. Salva il file CSV finale formattato per Shopify
+shopify_df = pd.DataFrame(shopify_rows)
+shopify_df.to_csv('shopify_import_prodotti.csv', index=False, encoding='utf-8-sig')
+print("File Shopify generato con successo con i codici EAN/Barcode inclusi!")
