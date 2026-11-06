@@ -1,68 +1,157 @@
-import pandas as pd
+import os
+import requests
+import xml.etree.ElementTree as ET
+from xml.dom import minidom
 
-# 1. Carica il file CSV sorgente
-df = pd.read_csv('tuo_file_sorgente.csv', sep='|')
+# Configurazione variabili d'ambiente
+SHOP_URL = os.environ.get("SHOP_URL", "").replace("https://", "").replace("http://", "").strip("/")
+CLIENT_ID = os.environ.get("CLIENT_ID", "").strip()
+CLIENT_SECRET = os.environ.get("CLIENT_SECRET", "").strip()
 
-shopify_rows = []
+# Dominio pubblico finale richiesto da Kelkoo
+PUBLIC_DOMAIN = "25thstreet.it"
 
-# 2. Scorre ogni riga del file direttamente
-for idx, row in df.iterrows():
-    sku = str(row['SKU']).strip()
-    size = row.get('MODEL_SIZE', '')
-    
-    # Costruisce lo SKU della variante unendo SKU e Taglia (se presente)
-    sku_var = f"{sku}_{size}" if pd.notna(size) and str(size).strip() != '' else sku
-    
-    # Calcolo prezzo con ricarico del 70% (+70%)
-    price_val = float(row['PRICE']) if pd.notna(row['PRICE']) else 0.0
-    price_markup = round(price_val * 1.70, 2)
-    
-    compare_price = round(float(row['STREET_PRICE']), 2) if pd.notna(row['STREET_PRICE']) else ""
-    qty = int(row['QUANTITY']) if pd.notna(row['QUANTITY']) else 0
-    
-    # --- LETTURA EAN / BARCODE DIRETTA ---
-    raw_barcode = row.get('BARCODE', row.get('EAN', ''))
-    if pd.notna(raw_barcode) and str(raw_barcode).strip() != '':
-        barcode = str(raw_barcode).split('.')[0].strip() # Pulisce eventuali decimali .0
-    else:
-        barcode = ""
-    
-    # Gestione immagini
-    images = [row.get('PICTURE_1', ''), row.get('PICTURE_2', ''), row.get('PICTURE_3', '')]
-    images = [img for img in images if pd.notna(img) and str(img).strip() != '']
-    
-    # Mappatura per il formato Shopify
-    shopify_row = {
-        'Handle': sku.lower().replace('_', '-').replace(' ', '-'),
-        'Title': row.get('Titel_ITA', ''),
-        'Body (HTML)': row.get('Description_ITA', ''),
-        'Vendor': row.get('BRAND', ''),
-        'Standard Product Type': row.get('SUBCAT', ''),
-        'Custom Product Type': row.get('SUBCAT', ''),
-        'Tags': f"{row.get('CAT', '')}, {row.get('SEX', '')}",
-        'Published': 'TRUE',
-        'Option1 Name': 'Taglia' if pd.notna(size) and str(size).strip() != '' else '',
-        'Option1 Value': size if pd.notna(size) else '',
-        'Option2 Name': 'Colore' if pd.notna(row.get('COLOR')) else '',
-        'Option2 Value': row.get('COLOR', '') if pd.notna(row.get('COLOR')) else '',
-        'Variant SKU': sku_var,
-        'Variant Grams': 0,
-        'Variant Inventory Tracker': 'shopify',
-        'Variant Qty': qty,
-        'Variant Inventory Policy': 'deny',
-        'Variant Fulfillment Service': 'manual',
-        'Variant Price': price_markup,
-        'Variant Compare At Price': compare_price,
-        'Variant Requires Shipping': 'TRUE',
-        'Variant Taxable': 'TRUE',
-        'Variant Barcode': barcode,  # <-- Qui viene inserito correttamente l'EAN
-        'Image Src': images[0] if len(images) > 0 else '',
-        'Image Position': 1 if len(images) > 0 else '',
-        'Status': 'active'
+def get_access_token():
+    url = f"https://{SHOP_URL}/admin/oauth/access_token"
+    payload = {
+        "client_id": CLIENT_ID,
+        "client_secret": CLIENT_SECRET,
+        "grant_type": "client_credentials"
     }
-    shopify_rows.append(shopify_row)
+    response = requests.post(url, json=payload)
+    response.raise_for_status()
+    return response.json()["access_token"]
 
-# 3. Salva il file CSV finale formattato per Shopify
-shopify_df = pd.DataFrame(shopify_rows)
-shopify_df.to_csv('shopify_import_prodotti.csv', index=False, encoding='utf-8-sig')
-print("File Shopify generato con successo con i codici EAN/Barcode inclusi!")
+def clean_ean(barcode):
+    """Pulisce il codice EAN evitando format float o scientifici."""
+    if not barcode:
+        return ""
+    barcode_str = str(barcode).strip()
+    if barcode_str.endswith('.0'):
+        barcode_str = barcode_str[:-2]
+    cleaned = ''.join(filter(str.isdigit, barcode_str))
+    return cleaned
+
+def fetch_all_products(access_token):
+    graphql_url = f"https://{SHOP_URL}/admin/api/2024-01/graphql.json"
+    headers = {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": access_token
+    }
+
+    query = """
+    query getProducts($cursor: String) {
+      products(first: 25, after: $cursor) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+        nodes {
+          title
+          handle
+          vendor
+          productType
+          featuredImage {
+            url
+          }
+          variants(first: 100) {
+            nodes {
+              id
+              title
+              sku
+              price
+              barcode
+              availableForSale
+              image {
+                url
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+
+    products = []
+    cursor = None
+    has_next_page = True
+
+    while has_next_page:
+        variables = {"cursor": cursor} if cursor else {}
+        response = requests.post(graphql_url, json={'query': query, 'variables': variables}, headers=headers)
+        
+        if response.status_code != 200:
+            print(f"Errore GraphQL: {response.text}")
+            break
+
+        data = response.json()
+        if "errors" in data:
+            print(f"Errore query: {data['errors']}")
+            break
+
+        product_data = data['data']['products']
+        products.extend(product_data['nodes'])
+        has_next_page = product_data['pageInfo']['hasNextPage']
+        cursor = product_data['pageInfo']['endCursor']
+        print(f"Scaricati {len(products)} prodotti...")
+
+    return products
+
+def generate_kelkoo_xml(products):
+    root = ET.Element("products")
+
+    for prod in products:
+        prod_title = prod.get("title", "")
+        handle = prod.get("handle", "")
+        vendor = prod.get("vendor", "")
+        category = prod.get("productType", "") or "General"
+        
+        main_img = prod.get("featuredImage", {}).get("url") if prod.get("featuredImage") else ""
+
+        for var in prod.get("variants", {}).get("nodes", []):
+            raw_var_id = var.get("id", "").split("/")[-1]
+            offer_id = var.get("sku") or raw_var_id
+            var_title = var.get("title", "")
+            
+            full_title = f"{prod_title} - {var_title}" if var_title and var_title.lower() != "default title" else prod_title
+            
+            # URL Prodotto valido usando handle e ID variante per Shopify
+            product_url = f"https://{PUBLIC_DOMAIN}/products/{handle}?variant={raw_var_id}"
+            
+            price = var.get("price", "0.00")
+            availability = "1" if var.get("availableForSale") else "2"
+            
+            var_img = var.get("image", {}).get("url") if var.get("image") else ""
+            img_url = var_img or main_img
+            
+            if not img_url:
+                continue
+
+            ean_code = clean_ean(var.get("barcode"))
+
+            p_elem = ET.SubElement(root, "product")
+            
+            ET.SubElement(p_elem, "offer_id").text = str(offer_id)
+            ET.SubElement(p_elem, "title").text = full_title
+            ET.SubElement(p_elem, "product_url").text = product_url
+            ET.SubElement(p_elem, "price").text = str(price)
+            ET.SubElement(p_elem, "brand").text = vendor
+            ET.SubElement(p_elem, "category").text = category
+            ET.SubElement(p_elem, "availability").text = availability
+            
+            if ean_code:
+                ET.SubElement(p_elem, "ean").text = ean_code
+            else:
+                ET.SubElement(p_elem, "ean")
+                
+            ET.SubElement(p_elem, "image_url").text = img_url
+
+    xml_str = minidom.parseString(ET.tostring(root, encoding="utf-8")).toprettyxml(indent="  ")
+    with open("kelkoo.xml", "w", encoding="utf-8") as f:
+        f.write(xml_str)
+    print("File kelkoo.xml generato con successo!")
+
+if __name__ == "__main__":
+    token = get_access_token()
+    prods = fetch_all_products(token)
+    generate_kelkoo_xml(prods)
