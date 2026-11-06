@@ -118,7 +118,9 @@ def generate_kelkoo_xml(products):
             # URL Prodotto valido usando handle e ID variante per Shopify
             product_url = f"https://{PUBLIC_DOMAIN}/products/{handle}?variant={raw_var_id}"
             
-            price = var.get("price", "0.00")
+            # PREZZO ORIGINALE ESATTO DA SHOPIFY (Nessun ricarico)
+            price = str(var.get("price", "0.00"))
+            
             availability = "1" if var.get("availableForSale") else "2"
             
             var_img = var.get("image", {}).get("url") if var.get("image") else ""
@@ -134,7 +136,7 @@ def generate_kelkoo_xml(products):
             ET.SubElement(p_elem, "offer_id").text = str(offer_id)
             ET.SubElement(p_elem, "title").text = full_title
             ET.SubElement(p_elem, "product_url").text = product_url
-            ET.SubElement(p_elem, "price").text = str(price)
+            ET.SubElement(p_elem, "price").text = price
             ET.SubElement(p_elem, "brand").text = vendor
             ET.SubElement(p_elem, "category").text = category
             ET.SubElement(p_elem, "availability").text = availability
@@ -149,7 +151,7 @@ def generate_kelkoo_xml(products):
     xml_str = minidom.parseString(ET.tostring(root, encoding="utf-8")).toprettyxml(indent="  ")
     with open("kelkoo.xml", "w", encoding="utf-8") as f:
         f.write(xml_str)
-    print("File kelkoo.xml generato con successo!")
+    print("File kelkoo.xml generato con successo con i dati originali di Shopify!")
 
 if __name__ == "__main__":
     token = get_access_token()
