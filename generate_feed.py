@@ -37,6 +37,7 @@ VARIANT_FIELDS = """
               title
               sku
               price
+              compareAtPrice
               availableForSale
               barcodes(first: 1) {
                 nodes {
@@ -329,6 +330,17 @@ def build_feed(products):
                 "price": price, "description": description,
                 "image-url": image, "availability": "1", "delivery-cost": delivery,
             }
+            # Kelkoo keeps the final selling price in price and the original
+            # price in price-no-rebate. Never infer or invent a reference price.
+            reference = variant.get("compareAtPrice")
+            if reference is not None:
+                try:
+                    reference_price = money(reference)
+                    if Decimal(reference_price) > Decimal(price):
+                        fields["price-no-rebate"] = reference_price
+                        counts["offers_with_reference_price"] += 1
+                except (InvalidOperation, ValueError, TypeError):
+                    counts["invalid_reference_price_omitted"] += 1
             if product.get("vendor"):
                 fields["brand"] = clean_text(product["vendor"])
             if category:
